@@ -1,0 +1,25 @@
+[project]
+name = "MatryoshkaDiffusion"
+version = "0.1.0"
+description = "Sample Text"
+authors = [
+    "Vasiliev Pavel <vasilievpavel4@gmail.com>",
+    "Byzov Tymofey <...@gmail.com>",
+]
+requires-python = ">=3.12"
+readme = "README.md"
+
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "wandb>=0.16.0",
+    "tqdm>=4.66.0",
+    "numpy>=1.26.0",
+    "dvc>=3.40.0",
+    "hydra-core>=1.3.0",
+    "omegaconf>=2.3.0",
+    "ipykernel",
+]
+
+[tool.uv]
+dev-dependencies = ["pytest>=7.4.0", "pytest-cov>=4.1.0"]
