@@ -19,6 +19,11 @@ dependencies = [
     "hydra-core>=1.3.0",
     "omegaconf>=2.3.0",
     "ipykernel",
+    "scikit-image>=0.25.2",
+    "pillow>=11.1.0",
+    "matplotlib>=3.10.1",
+    "einops>=0.8.1",
+    "rotary-embedding-torch>=0.8.6",
 ]
 
 [tool.uv]

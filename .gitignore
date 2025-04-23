@@ -8,3 +8,9 @@
 /dataSources.local.xml
 
 .idea
+
+.venv
+
+tiny-imagenet-200/
+
+__pycache__
