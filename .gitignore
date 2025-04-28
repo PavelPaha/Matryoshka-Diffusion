@@ -8,8 +8,8 @@
 /dataSources.local.xml
 
 .idea
-
 .venv
+.vcode
 
 tiny-imagenet-200/
 data/
