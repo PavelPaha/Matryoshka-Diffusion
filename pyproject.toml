@@ -14,7 +14,8 @@ dependencies = [
     "matplotlib (>=3.10.1,<4.0.0)",
     "torchvision (>=0.22.0,<0.23.0)",
     "einops (>=0.8.1,<0.9.0)",
-    "pandas (>=2.2.3,<3.0.0)"
+    "pandas (>=2.2.3,<3.0.0)",
+    "tensorboard (>=2.19.0,<3.0.0)"
 ]
 
 
