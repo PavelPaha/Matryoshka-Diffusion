@@ -10,6 +10,7 @@
 .idea
 .venv
 .vcode
+output
 
 tiny-imagenet-200/
 data/

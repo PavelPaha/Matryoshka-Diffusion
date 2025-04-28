@@ -35,16 +35,15 @@ def get_test_args():
     # Основные параметры обучения
     args.batch_size = 32
     args.epochs = 5
-    args.num_steps = 1000
     args.fp16 = False
     args.gradient_clip_norm = 2.0
-    args.lr = 5.0e-05
+    args.lr = 1.0e-05
 
     args.num_levels = 2
     
-    args.output_dir = "./debug_output"
+    args.output_dir = "./output"
     args.log_freq = 5
-    # args.save_freq = 20
+    args.save_freq = 1000
     
     # args.loss_factor = 1.0
     # args.num_gradient_accumulations = 1
@@ -73,6 +72,7 @@ def main():
         args,
         nested_unet_config,
         diffusion_config,
+        logger=get_logger(args)
     )
 
 
