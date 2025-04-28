@@ -4,7 +4,7 @@ import torch.nn as nn
 from configs.unet import ResNetConfig
 from models.auxiliary_models.attention import PixelsAttention
 from models.utils import zero_module
-import torch.functional as F
+import torch.nn.functional as F
 
 class ResNet(nn.Module):
     def __init__(self, time_emb_dim, config: ResNetConfig):

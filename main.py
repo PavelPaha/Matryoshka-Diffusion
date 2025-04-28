@@ -33,12 +33,14 @@ def get_test_args():
     args = Namespace()
     
     # Основные параметры обучения
-    args.batch_size = 4
-    args.epochs = 2
-    args.num_steps = 100
+    args.batch_size = 32
+    args.epochs = 5
+    args.num_steps = 1000
     args.fp16 = False
     args.gradient_clip_norm = 2.0
-    args.lr = 1e-4
+    args.lr = 5.0e-05
+
+    args.num_levels = 2
     
     args.output_dir = "./debug_output"
     args.log_freq = 5
@@ -67,7 +69,7 @@ def main():
     )
 
     train(
-        torch.device("cpu"),
+        torch.device("cuda:1"),
         args,
         nested_unet_config,
         diffusion_config,

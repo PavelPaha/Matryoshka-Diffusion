@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from configs.diffusion import *
 from configs.unet import NestedUNetConfig
 from datasets.flickr30k.dataset import FlickrDataset
-from helpers.collator import DiffusionCollator, ImagePyramidCreator
+from helpers.collator import DiffusionCollator
 from helpers.lm import create_lm
 from models.diffusion import NestedDiffusion
 from models.nested_unet import NestedUNet
@@ -23,24 +23,26 @@ def get_dataset():
         [
             T.Resize(IMAGE_SIZE),
             T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            #T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ]
     )
     root = "./data/flickr30k/Images"
     caps = "./data/flickr30k/captions.txt"
     return FlickrDataset(root, caps, transforms=transforms)
 
-def get_dataloader(batch_size: int, tokenizer, pyramid_creator):
+def get_dataloader(batch_size: int, tokenizer):
 
-    collator = DiffusionCollator(tokenizer, pyramid_creator)
+    collator = DiffusionCollator(tokenizer)
 
     train_dataset = get_dataset()
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=1,  #FIXME: пока один, чтобы дебаг работал корректно
-        pin_memory=True,
+        num_workers=8,
+        persistent_workers=True,  # Избегает повторной инициализации workers
+        prefetch_factor=2,  # Предзагрузка данных для следующих батчей
         collate_fn=collator,
     )
 
@@ -58,13 +60,13 @@ def get_model(unet_config: NestedUNetConfig, diffusion_config: DiffusionConfig, 
 
 
 def train_batch(
-    model, sample, optimizer, scheduler, args, logger=None, grad_scaler=None
+    model: NestedDiffusion, sample: dict, optimizer, scheduler, args, logger=None, grad_scaler=None
 ):
     model.train()
     lr = scheduler.get_last_lr()[0]
 
     if args.fp16 and grad_scaler is not None:
-        with torch.cuda.amp.autocast():
+        with torch.cuda.autocast():
             total_loss, times, x_t_multi_res, predictions = model.get_loss(sample)
             loss = total_loss.mean()
         loss_val = loss.item()
@@ -113,24 +115,25 @@ def train(
     logger=None,
 ):
     logging.info(f"Using device: {device}")
-    diffusion_model = get_model(unet_config, diffusion_config, device)
-    tokenizer, encoder = create_lm()
 
+    logging.info("Getting LM")
+    tokenizer, encoder = create_lm()
+    logging.info("Getting Dataloader")
+    train_loader = get_dataloader(args.batch_size, tokenizer)
+    
+    best_loss = float("inf")
+    exp_avg_loss = 0
+    batch_num = 0
+    
+    diffusion_model = get_model(unet_config, diffusion_config, device)
+    
     optimizer = torch.optim.AdamW(
         diffusion_model.parameters(), lr=args.lr, weight_decay=0.01
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.num_steps # FIXME: высчитывать корректное значение
+        optimizer, T_max=args.epochs * len(train_loader)
     )
     grad_scaler = torch.amp.GradScaler() if args.fp16 else None
-
-    num_levels = len(unet_config.resolution_channels)
-    pyramid_creator = ImagePyramidCreator(num_levels, 2, device)
-    train_loader = get_dataloader(args.batch_size, tokenizer, pyramid_creator)
-
-    best_loss = float("inf")
-    exp_avg_loss = 0
-    batch_num = 0
 
     logging.info("Starting training...")
     for epoch in range(args.epochs):
@@ -139,20 +142,11 @@ def train(
             batch_num += 1
             start_time = time.time()
 
-            sample = encoder(sample)
+            sample["lm_outputs"] = encoder(sample["lm_outputs"])
 
             for key, value in sample.items():
                 if isinstance(value, torch.Tensor):
                     sample[key] = value.to(device)
-
-            # Normalize images to [-1, 1] if needed
-            if "image" in sample:
-                img = sample["image"].float()   # FIXME: другие ключи
-                if img.max() > 1.0:  # likely in [0,255]
-                    img = (img - 127.5) / 127.5
-                if img.dim() == 4 and img.shape[1] != 3:
-                    img = img.permute(0, 3, 1, 2)
-                sample["image"] = img
 
             loss_val, losses, times, x_t, predictions = train_batch(
                 diffusion_model,
@@ -175,30 +169,30 @@ def train(
                     f"LR: {scheduler.get_last_lr()[0]:.6f} | Time: {elapsed:.2f}s"
                 )
 
-            if batch_num % args.save_freq == 0:
-                model_path = os.path.join(args.output_dir, f"model_{batch_num:06d}.pt")
-                logging.info(f"Saving model to {model_path}")
-                torch.save(
-                    {
-                        "batch_num": batch_num,
-                        "model_state_dict": diffusion_model.state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict(),
-                        "scheduler_state_dict": scheduler.state_dict(),
-                        "loss": loss_val,
-                        "exp_avg_loss": exp_avg_loss,
-                    },
-                    model_path,
-                )
-                if exp_avg_loss < best_loss:
-                    best_loss = exp_avg_loss
-                    best_model_path = os.path.join(args.output_dir, "best_model.pt")
-                    torch.save(
-                        {
-                            "batch_num": batch_num,
-                            "model_state_dict": diffusion_model.state_dict(),
-                            "optimizer_state_dict": optimizer.state_dict(),
-                            "loss": loss_val,
-                            "exp_avg_loss": exp_avg_loss,
-                        },
-                        best_model_path,
-                    )
+            # if batch_num % args.save_freq == 0:
+            #     model_path = os.path.join(args.output_dir, f"model_{batch_num:06d}.pt")
+            #     logging.info(f"Saving model to {model_path}")
+            #     torch.save(
+            #         {
+            #             "batch_num": batch_num,
+            #             "model_state_dict": diffusion_model.state_dict(),
+            #             "optimizer_state_dict": optimizer.state_dict(),
+            #             "scheduler_state_dict": scheduler.state_dict(),
+            #             "loss": loss_val,
+            #             "exp_avg_loss": exp_avg_loss,
+            #         },
+            #         model_path,
+            #     )
+            #     if exp_avg_loss < best_loss:
+            #         best_loss = exp_avg_loss
+            #         best_model_path = os.path.join(args.output_dir, "best_model.pt")
+            #         torch.save(
+            #             {
+            #                 "batch_num": batch_num,
+            #                 "model_state_dict": diffusion_model.state_dict(),
+            #                 "optimizer_state_dict": optimizer.state_dict(),
+            #                 "loss": loss_val,
+            #                 "exp_avg_loss": exp_avg_loss,
+            #             },
+            #             best_model_path,
+            #         )

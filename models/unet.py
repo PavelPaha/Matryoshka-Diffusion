@@ -6,7 +6,7 @@ import torch.nn as nn
 from configs.unet import UNetConfig
 from models.auxiliary_models.resblock import ResNetBlock
 from models.utils import zero_module
-import torch.functional as F
+import torch.nn.functional as F
 
 class UNet(nn.Module):
     def __init__(self, input_channels: int, output_channels: int, config: UNetConfig):
