@@ -36,8 +36,8 @@ def get_test_args():
     args.batch_size = 32
     args.epochs = 5
     args.fp16 = False
-    args.gradient_clip_norm = 2.0
-    args.lr = 1.0e-05
+    args.gradient_clip_norm = 0.5
+    args.lr = 1.0e-03
 
     args.num_levels = 2
     
@@ -46,7 +46,7 @@ def get_test_args():
     args.save_freq = 1000
     
     # args.loss_factor = 1.0
-    # args.num_gradient_accumulations = 1
+    args.num_gradient_accumulations = 4
     
     return args
 

@@ -33,7 +33,7 @@ def get_dataset():
 
 def get_dataloader(batch_size: int, tokenizer):
 
-    collator = DiffusionCollator(tokenizer)
+    collator = DiffusionCollator(tokenizer, max_cap_length=128)
 
     train_dataset = get_dataset()
     train_loader = DataLoader(
@@ -130,6 +130,7 @@ def train(
     best_loss = float("inf")
     exp_avg_loss = 0
     batch_num = 0
+    global_step = 0
 
     diffusion_model = get_model(unet_config, diffusion_config, device)
 
@@ -137,7 +138,8 @@ def train(
         diffusion_model.parameters(), lr=args.lr, weight_decay=0.01
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs * len(train_loader)
+        optimizer,
+        T_max=args.epochs * len(train_loader) // args.num_gradient_accumulations,
     )
     grad_scaler = torch.amp.GradScaler() if args.fp16 else None
 
@@ -149,40 +151,101 @@ def train(
             if logger:
                 logger.batch_num = batch_num
             start_time = time.time()
-            
+
             sample["lm_outputs"] = encoder(sample["lm_outputs"])
 
             for key, value in sample.items():
                 if isinstance(value, torch.Tensor):
                     sample[key] = value.to(device)
 
-            loss_val, losses, times, x_t, predictions = train_batch(
-                diffusion_model,
-                sample,
-                optimizer,
-                scheduler,
-                args,
-                logger,
-                grad_scaler=grad_scaler,
-            )
+            # Modify train_batch function to support gradient accumulation
+            if args.fp16 and grad_scaler is not None:
+                with torch.cuda.autocast():
+                    total_loss, times, x_t_multi_res, predictions = (
+                        diffusion_model.get_loss(sample)
+                    )
+                    loss = total_loss.mean() / args.num_gradient_accumulations
+                loss_val = (
+                    loss.item() * args.num_gradient_accumulations
+                )  # Scale back for logging
+                if np.isnan(loss_val):
+                    optimizer.zero_grad()
+                    continue
+                grad_scaler.scale(loss).backward()
+            else:
+                total_loss, times, x_t_multi_res, predictions = (
+                    diffusion_model.get_loss(sample)
+                )
+                loss = total_loss.mean() / args.num_gradient_accumulations
+                loss_val = (
+                    loss.item() * args.num_gradient_accumulations
+                )  # Scale back for logging
+                if np.isnan(loss_val):
+                    optimizer.zero_grad()
+                    continue
+                loss.backward()
+
+            # Only step and zero gradients after accumulating
+            if (batch_num % args.num_gradient_accumulations == 0) or (
+                i == len(train_loader) - 1
+            ):
+                global_step += 1
+
+                if args.fp16 and grad_scaler is not None:
+                    grad_scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        diffusion_model.parameters(), args.gradient_clip_norm
+                    )
+                    grad_scaler.step(optimizer)
+                    grad_scaler.update()
+                else:
+                    torch.nn.utils.clip_grad_norm_(
+                        diffusion_model.parameters(), args.gradient_clip_norm
+                    )
+                    optimizer.step()
+
+                optimizer.zero_grad()
+                scheduler.step()
 
             exp_avg_loss = (
                 loss_val if batch_num == 1 else 0.99 * exp_avg_loss + 0.01 * loss_val
             )
 
             elapsed = time.time() - start_time
+
+            # Log based on global_step, not batch_num
             if batch_num % args.log_freq == 0:
                 logging.info(
-                    f"Batch {batch_num} | Loss: {loss_val:.4f} | Avg Loss: {exp_avg_loss:.4f} | "
+                    f"Batch {batch_num} | Global Step {global_step} | Loss: {loss_val:.4f} | Avg Loss: {exp_avg_loss:.4f} | "
                     f"LR: {scheduler.get_last_lr()[0]:.6f} | Time: {elapsed:.2f}s"
                 )
 
-            if batch_num % args.save_freq == 0:
-                model_path = os.path.join(args.output_dir, f"model_{batch_num:06d}.pt")
+                if logger is not None:
+                    logger.add_scalar("train/Loss", loss_val, global_step=global_step)
+                    logger.add_scalar(
+                        "train/LR", scheduler.get_last_lr()[0], global_step=global_step
+                    )
+                    if getattr(diffusion_model.config, "use_double_loss", False):
+                        for j, weight in enumerate(
+                            diffusion_model.config.multi_res_weights
+                        ):
+                            resolution_loss = (total_loss[j] / weight).mean().item()
+                            logger.add_scalar(
+                                f"train/Loss_resolution_{j}",
+                                resolution_loss,
+                                global_step=global_step,
+                            )
+
+            # Save based on global_step, not batch_num
+            if global_step > 0 and batch_num % args.save_freq == 0:
+                model_path = os.path.join(
+                    args.output_dir, f"model_{global_step:06d}.pt"
+                )
                 logging.info(f"Saving model to {model_path}")
                 torch.save(
                     {
                         "batch_num": batch_num,
+                        "global_step": global_step,
                         "model_state_dict": diffusion_model.state_dict(),
                         "optimizer_state_dict": optimizer.state_dict(),
                         "scheduler_state_dict": scheduler.state_dict(),
@@ -197,6 +260,7 @@ def train(
                     torch.save(
                         {
                             "batch_num": batch_num,
+                            "global_step": global_step,
                             "model_state_dict": diffusion_model.state_dict(),
                             "optimizer_state_dict": optimizer.state_dict(),
                             "loss": loss_val,
