@@ -8,13 +8,11 @@ import torchvision.transforms as T
 from torch.utils.data import DataLoader
 
 from configs.diffusion import *
-from configs.unet import NestedUNetConfig
 from datasets.flickr30k.dataset import FlickrDataset
 from helpers.collator import DiffusionCollator
 from helpers.lm import create_lm
 from helpers.lr_scaler import LRScaler
 from models.diffusion import NestedDiffusion
-from models.nested_unet import NestedUNet
 
 
 def get_dataset():
@@ -23,7 +21,6 @@ def get_dataset():
         [
             T.Resize(IMAGE_SIZE),
             T.ToTensor(),
-            # T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ]
     )
@@ -42,22 +39,14 @@ def get_dataloader(batch_size: int, tokenizer):
         batch_size=batch_size,
         shuffle=True,
         num_workers=8,
-        pin_memory=True,  # Ускоряет передачу данных на GPU
-        persistent_workers=True,  # Избегает повторной инициализации workers
-        prefetch_factor=2,  # Предзагрузка данных для следующих батчей
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2,
         collate_fn=collator,
     )
 
     return train_loader
 
-
-def get_model(unet_config: NestedUNetConfig, diffusion_config: DiffusionConfig, device):
-    unet_model = NestedUNet(
-        input_channels=3,
-        output_channels=3,
-        config=unet_config,
-    ).to(device)
-    return NestedDiffusion(vision_model=unet_model, config=diffusion_config).to(device)
 
 
 def train_batch(
@@ -67,58 +56,43 @@ def train_batch(
     scheduler,
     args,
     logger=None,
-    grad_scaler=None,
+    accumulate_gradient: bool = False,
+    num_grad_accumulations: int = 1,
 ):
     model.train()
     lr = scheduler.get_last_lr()[0]
 
-    if args.fp16 and grad_scaler is not None:
-        with torch.cuda.autocast():
-            total_loss, times, x_t_multi_res, predictions = model.get_loss(sample)
-            loss = total_loss.mean()
-        loss_val = loss.item()
-        if np.isnan(loss_val):
-            optimizer.zero_grad()
-            return loss_val, total_loss, times, x_t_multi_res, predictions
-        grad_scaler.scale(loss).backward()
-        grad_scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradient_clip_norm)
-        grad_scaler.step(optimizer)
-        grad_scaler.update()
-    else:
-        total_loss, times, x_t_multi_res, predictions = model.get_loss(sample)
-        loss = total_loss.mean()
-        loss_val = loss.item()
-        if np.isnan(loss_val):
-            optimizer.zero_grad()
-            return loss_val, total_loss, times, x_t_multi_res, predictions
-        loss.backward()
+    total_loss, times, x_t_multi_res, predictions = model.get_loss(sample)
+    loss = total_loss.mean()
+    
+    if num_grad_accumulations != 1:
+        loss = loss / num_grad_accumulations
+    
+    loss_val = loss.item() * (num_grad_accumulations if num_grad_accumulations != 1 else 1)  # Scale back for logging
+    
+    if np.isnan(loss_val):
+        optimizer.zero_grad()
+        return loss_val, total_loss, times, x_t_multi_res, predictions
+    
+    loss.backward()
+    
+    if not accumulate_gradient:
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradient_clip_norm)
         optimizer.step()
+        optimizer.zero_grad()
+        scheduler.step()
 
-    scheduler.step()
-    optimizer.zero_grad()
-
-    if logger is not None:
-        logger.add_scalar("train/Loss", loss_val, global_step=logger.batch_num)
-        logger.add_scalar("train/LR", lr, global_step=logger.batch_num)
-        if getattr(model.config, "use_double_loss", False):
-            for i, weight in enumerate(model.config.multi_res_weights):
-                resolution_loss = (total_loss[i] / weight).mean().item()
-                logger.add_scalar(
-                    f"train/Loss_resolution_{i}",
-                    resolution_loss,
-                    global_step=logger.batch_num,
-                )
+    if logger is not None and not accumulate_gradient:
+        logger.add_scalar("train/Loss", loss_val, global_step=logger.step)
+        logger.add_scalar("train/LR", lr, global_step=logger.step)
 
     return loss_val, total_loss, times, x_t_multi_res, predictions
 
 
-def train(
+def train_loop(
     device,
     args,
-    unet_config: NestedUNetConfig,
-    diffusion_config: DiffusionConfig,
+    diffusion_model: NestedDiffusion,
     logger=None,
 ):
     logging.info(f"Using device: {device}")
@@ -130,121 +104,90 @@ def train(
 
     best_loss = float("inf")
     exp_avg_loss = 0
-    batch_num = 0
-    global_step = 0
-
-    diffusion_model = get_model(unet_config, diffusion_config, device)
+    exp_avg_loss_var = 0
+    step = 0
+    accumulation_counter = 0
+    total_loss_val = 0
+    wt = 0.01
+    CLIP = 3
 
     optimizer = torch.optim.AdamW(
         diffusion_model.parameters(), lr=args.lr, weight_decay=0.05
     )
     lr_scaler = LRScaler()
-    scheduler = lr_scaler.get_lr_scheduler(0, optimizer)
-    grad_scaler = torch.amp.GradScaler() if args.fp16 else None
+    scheduler = lr_scaler.get_lr_scheduler(args.warmup_steps, optimizer)
 
-    logging.info("Starting training...")
+    logging.info(f"Starting training with {args.warmup_steps} warmup steps")
     for epoch in range(args.epochs):
         logging.info(f"Starting epoch {epoch+1}/{args.epochs}")
-        for i, sample in enumerate(train_loader):
-            batch_num += 1
+        for i, batch in enumerate(train_loader):
+            # Handle gradient accumulation counter
+            accumulation_counter = (accumulation_counter + 1) % args.num_gradient_accumulations
+            is_last_in_loader = (i == len(train_loader) - 1)
+            
+            # Only increment step when we're doing an optimizer step
+            if accumulation_counter == 0 or is_last_in_loader:
+                step += 1
+            
+            accumulate_gradient = (accumulation_counter != 0 and not is_last_in_loader)
+
             if logger:
-                logger.batch_num = batch_num
+                logger.step = step
             start_time = time.time()
 
-            sample["lm_outputs"] = encoder(sample["lm_outputs"])
-
-            for key, value in sample.items():
+            batch["lm_outputs"] = encoder(batch["lm_outputs"])
+            for key, value in batch.items():
                 if isinstance(value, torch.Tensor):
-                    sample[key] = value.to(device)
+                    batch[key] = value.to(device)
 
-            # Modify train_batch function to support gradient accumulation
-            if args.fp16 and grad_scaler is not None:
-                with torch.cuda.autocast():
-                    total_loss, times, x_t_multi_res, predictions = (
-                        diffusion_model.get_loss(sample)
-                    )
-                    loss = total_loss.mean() / args.num_gradient_accumulations
-                loss_val = (
-                    loss.item() * args.num_gradient_accumulations
-                )  # Scale back for logging
-                if np.isnan(loss_val):
-                    optimizer.zero_grad()
-                    continue
-                grad_scaler.scale(loss).backward()
-            else:
-                total_loss, times, x_t_multi_res, predictions = (
-                    diffusion_model.get_loss(sample)
-                )
-                loss = total_loss.mean() / args.num_gradient_accumulations
-                loss_val = (
-                    loss.item() * args.num_gradient_accumulations
-                )  # Scale back for logging
-                if np.isnan(loss_val):
-                    optimizer.zero_grad()
-                    continue
-                loss.backward()
-
-            # Only step and zero gradients after accumulating
-            if (batch_num % args.num_gradient_accumulations == 0) or (
-                i == len(train_loader) - 1
-            ):
-                global_step += 1
-
-                if args.fp16 and grad_scaler is not None:
-                    grad_scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        diffusion_model.parameters(), args.gradient_clip_norm
-                    )
-                    grad_scaler.step(optimizer)
-                    grad_scaler.update()
-                else:
-                    torch.nn.utils.clip_grad_norm_(
-                        diffusion_model.parameters(), args.gradient_clip_norm
-                    )
-                    optimizer.step()
-
-                optimizer.zero_grad()
-                scheduler.step()
-
-            exp_avg_loss = (
-                loss_val if batch_num == 1 else 0.99 * exp_avg_loss + 0.01 * loss_val
+            loss_val, losses, times, x_t, predictions = train_batch(
+                model=diffusion_model,
+                sample=batch,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                args=args,
+                logger=logger,
+                accumulate_gradient=accumulate_gradient,
+                num_grad_accumulations=args.num_gradient_accumulations,
             )
 
+            if np.isnan(loss_val):
+                continue
+
+            if step != 1:
+                # E[(x-E[x])^2] = E[x^2] - E[x]^2
+                std_loss = np.sqrt(max(1e-8, exp_avg_loss_var))  # Avoid sqrt of negative numbers
+                delta_loss = loss_val - exp_avg_loss
+                clipped_loss = exp_avg_loss + std_loss * CLIP * np.tanh(
+                    delta_loss / (std_loss * CLIP + 1e-8)  # Avoid division by zero
+                )
+                exp_avg_loss = exp_avg_loss * (1.0 - wt) + wt * clipped_loss
+                exp_avg_loss_var = (
+                    exp_avg_loss_var * (1.0 - wt) + wt * (clipped_loss - exp_avg_loss) ** 2
+                )
+            else:
+                std_loss = loss_val
+                exp_avg_loss = loss_val
+                exp_avg_loss_var = loss_val**2
+            
+            total_loss_val += loss_val
+            
             elapsed = time.time() - start_time
-
-            # Log based on global_step, not batch_num
-            if batch_num % args.log_freq == 0:
+            
+            # Only log when an optimizer step is performed
+            if not accumulate_gradient and step % args.log_freq == 0:
                 logging.info(
-                    f"Batch {batch_num} | Global Step {global_step} | Loss: {loss_val:.4f} | Avg Loss: {exp_avg_loss:.4f} | "
-                    f"LR: {scheduler.get_last_lr()[0]:.6f} | Time: {elapsed:.2f}s"
+                    f"Step {step} | Loss: {loss_val:.4f} | Avg Loss: {exp_avg_loss:.4f} | "
+                    f"StdDev: {std_loss:.4f} | LR: {scheduler.get_last_lr()[0]:.6f} | Time: {elapsed:.2f}s"
                 )
-
-                if logger is not None:
-                    logger.add_scalar("train/Loss", loss_val, global_step=global_step)
-                    logger.add_scalar(
-                        "train/LR", scheduler.get_last_lr()[0], global_step=global_step
-                    )
-                    if getattr(diffusion_model.config, "use_double_loss", False):
-                        for j, weight in enumerate(
-                            diffusion_model.config.multi_res_weights
-                        ):
-                            resolution_loss = (total_loss[j] / weight).mean().item()
-                            logger.add_scalar(
-                                f"train/Loss_resolution_{j}",
-                                resolution_loss,
-                                global_step=global_step,
-                            )
-
-            # Save based on global_step, not batch_num
-            if global_step > 0 and batch_num % args.save_freq == 0:
-                model_path = os.path.join(
-                    args.output_dir, f"model_{global_step:06d}.pt"
-                )
+                
+            # Only save when an optimizer step is performed
+            if not accumulate_gradient and step > 0 and step % args.save_freq == 0:
+                model_path = os.path.join(args.output_dir, f"model_{step:06d}.pt")
                 logging.info(f"Saving model to {model_path}")
                 torch.save(
                     {
-                        "batch_num": batch_num,
-                        "global_step": global_step,
+                        "step": step,
                         "model_state_dict": diffusion_model.state_dict(),
                         "optimizer_state_dict": optimizer.state_dict(),
                         "scheduler_state_dict": scheduler.state_dict(),
@@ -254,13 +197,11 @@ def train(
                     model_path,
                 )
                 if exp_avg_loss < best_loss:
-                    logging.info("New best model")
                     best_loss = exp_avg_loss
                     best_model_path = os.path.join(args.output_dir, "best_model.pt")
                     torch.save(
                         {
-                            "batch_num": batch_num,
-                            "global_step": global_step,
+                            "step": step,
                             "model_state_dict": diffusion_model.state_dict(),
                             "optimizer_state_dict": optimizer.state_dict(),
                             "loss": loss_val,

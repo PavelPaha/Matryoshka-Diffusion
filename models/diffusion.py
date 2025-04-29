@@ -175,20 +175,7 @@ class NestedDiffusion(nn.Module):
                batch_size: int = 1, 
                guidance_scale: float = 1.0,
                num_inference_steps: int = None) -> torch.Tensor:
-        """
-        Генерирует изображения из шума с использованием текстовых подсказок
-        
-        Args:
-            text_embeddings: Эмбеддинги текста
-            text_mask: Маска текста
-            image_size: Размер генерируемого изображения
-            batch_size: Размер батча
-            guidance_scale: Коэффициент для classifier-free guidance
-            num_inference_steps: Количество шагов для генерации, если None - используется полное число
-        
-        Returns:
-            Сгенерированные изображения
-        """
+
         self.eval()
         device = text_embeddings.device
         

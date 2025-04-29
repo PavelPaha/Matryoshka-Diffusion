@@ -8,6 +8,7 @@ from models.auxiliary_models.resblock import ResNetBlock
 from models.utils import zero_module
 import torch.nn.functional as F
 
+
 class UNet(nn.Module):
     def __init__(self, input_channels: int, output_channels: int, config: UNetConfig):
         super().__init__()
@@ -15,8 +16,8 @@ class UNet(nn.Module):
         self.config = config
         self.input_channels = input_channels
         self.output_channels = output_channels
-        
-        # we will overwrite config.conditioning_feature_dim if config.conditioning_feature_proj_dim is provided        
+
+        # we will overwrite config.conditioning_feature_dim if config.conditioning_feature_proj_dim is provided
         self.input_conditioning_feature_dim = config.conditioning_feature_dim
         if (
             config.conditioning_feature_dim > 0
@@ -40,7 +41,6 @@ class UNet(nn.Module):
 
         self.temb_layer1 = nn.Linear(self.time_emb_dim // 4, self.time_emb_dim)
         self.temb_layer2 = nn.Linear(self.time_emb_dim, self.time_emb_dim)
-
 
         channels = config.resolution_channels[0]
         self.conv_in = nn.Conv2d(
@@ -66,7 +66,7 @@ class UNet(nn.Module):
                 skip_channels.append(resnet_config.out_channels)
 
             num_attention_layers = self.config.num_attention_layers[i]
-            
+
             self.down_blocks.append(
                 ResNetBlock(
                     self.time_emb_dim,
@@ -122,7 +122,7 @@ class UNet(nn.Module):
                 channels = resnet_config.out_channels
 
             num_attention_layers = config.num_attention_layers[i]
-            
+
             self.up_blocks.append(
                 ResNetBlock(
                     self.time_emb_dim,
@@ -151,9 +151,6 @@ class UNet(nn.Module):
         self.up_blocks = nn.ModuleList(self.up_blocks)
 
 
-
-
-
     def create_time_emb(self, times, ff_layers=None):
         temb = times.view(-1, 1) * self.t_emb
         temb = torch.cat([torch.sin(temb), torch.cos(temb)], dim=1)
@@ -166,7 +163,6 @@ class UNet(nn.Module):
             layer1, layer2 = ff_layers
         temb = layer2(F.silu(layer1(temb)))
         return temb
-
 
     def forward_input_layer(self, x_t, normalize=False):
         if isinstance(x_t, list) and len(x_t) == 1:
@@ -217,9 +213,7 @@ class UNet(nn.Module):
             del skip_activations[-num_skip:]
         return x
 
-    def forward_denoising(
-        self, x_t, times, conditioning=None, cond_mask=None
-    ):
+    def forward_denoising(self, x_t, times, conditioning=None, cond_mask=None):
         # 1. time embedding
         temb = self.create_time_emb(times)
 
@@ -227,7 +221,7 @@ class UNet(nn.Module):
         if self.config.nesting:
             x_t, x_feat = x_t
         x = self.forward_input_layer(x_t)
-        
+
         if self.config.nesting:
             x = x + x_feat
 
@@ -249,13 +243,12 @@ class UNet(nn.Module):
         if self.config.nesting:
             return x_out, x
         return x_out
-    
+
     def forward_conditioning(self, conditioning):
         if self.config.conditioning_feature_proj_dim > 0:
             conditioning = self.lm_proj(conditioning)
-        
-        return conditioning
 
+        return conditioning
 
     def forward(
         self,
@@ -267,9 +260,7 @@ class UNet(nn.Module):
 
         conditioning = self.forward_conditioning(conditioning)
 
-        return self.forward_denoising(
-            x_t, times, conditioning, cond_mask
-        )
+        return self.forward_denoising(x_t, times, conditioning, cond_mask)
 
     @property
     def model_type(self):

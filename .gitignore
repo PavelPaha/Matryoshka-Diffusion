@@ -9,8 +9,9 @@
 
 .idea
 .venv
-.vcode
+.vscode
 output
+generated
 
 tiny-imagenet-200/
 data/
