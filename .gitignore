@@ -8,3 +8,16 @@
 /dataSources.local.xml
 
 .idea
+.venv
+.vscode
+output
+generated
+
+tiny-imagenet-200/
+data/
+
+flickr8k.zip
+flickr30k.zip
+
+
+__pycache__
