@@ -19,11 +19,6 @@ poetry install
 - **Tiny ImageNet**: Упрощенная версия ImageNet для быстрого обучения и тестирования
 - **Flickr30k**: Датасет изображений с текстовыми описаниями
 
-```bash
-# Для загрузки датасетов можно использовать скрипт
-python load_datasets.py --dataset flickr30k
-```
-
 > Мы для упрощения использовали [Flickr30k](https://paperswithcode.com/dataset/flickr30k). [Вот как скачать](https://github.com/awsaf49/flickr-dataset)
 
 ## Обучение модели
