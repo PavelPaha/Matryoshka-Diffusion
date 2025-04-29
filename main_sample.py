@@ -77,17 +77,16 @@ def parse_sampling_args():
 def main():
 
     args = parse_sampling_args()
-
     device = torch.device(args.device)
-    model = get_model(nested_unet_config, diffusion_config, device)  # TODO: load
-
+    
+    model = get_model(nested_unet_config, diffusion_config, device)
     checkpoint_data = torch.load(args.checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint_data["model_state_dict"])
     logging.info("Model loaded")
 
     sample_images(
         model=model,
-        prompts=["Cool dog"],
+        prompts=args.prompts,
         device=device,
         num_inference_steps=args.num_inference_steps,
         image_size=args.image_size,
