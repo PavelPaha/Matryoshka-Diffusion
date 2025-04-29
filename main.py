@@ -68,7 +68,7 @@ def main():
     )
 
     train(
-        torch.device("cuda:1"),
+        torch.device("cuda:3"),
         args,
         nested_unet_config,
         diffusion_config,

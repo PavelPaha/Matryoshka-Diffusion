@@ -12,6 +12,7 @@ from configs.unet import NestedUNetConfig
 from datasets.flickr30k.dataset import FlickrDataset
 from helpers.collator import DiffusionCollator
 from helpers.lm import create_lm
+from helpers.lr_scaler import LRScaler
 from models.diffusion import NestedDiffusion
 from models.nested_unet import NestedUNet
 
@@ -135,12 +136,10 @@ def train(
     diffusion_model = get_model(unet_config, diffusion_config, device)
 
     optimizer = torch.optim.AdamW(
-        diffusion_model.parameters(), lr=args.lr, weight_decay=0.01
+        diffusion_model.parameters(), lr=args.lr, weight_decay=0.05
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=args.epochs * len(train_loader) // args.num_gradient_accumulations,
-    )
+    lr_scaler = LRScaler()
+    scheduler = lr_scaler.get_lr_scheduler(0, optimizer)
     grad_scaler = torch.amp.GradScaler() if args.fp16 else None
 
     logging.info("Starting training...")
@@ -255,6 +254,7 @@ def train(
                     model_path,
                 )
                 if exp_avg_loss < best_loss:
+                    logging.info("New best model")
                     best_loss = exp_avg_loss
                     best_model_path = os.path.join(args.output_dir, "best_model.pt")
                     torch.save(
