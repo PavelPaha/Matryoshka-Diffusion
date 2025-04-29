@@ -74,29 +74,12 @@ def parse_args():
         help="Устройство для обучения (cuda:X или cpu)",
     )
 
-    # Дополнительные параметры
-    parser.add_argument(
-        "--weight_decay", type=float, default=0.05, help="Параметр регуляризации весов"
-    )
     parser.add_argument(
         "--seed", type=int, default=42, help="Seed для воспроизводимости результатов"
     )
 
-    # Параметры генерации
-    parser.add_argument(
-        "--num_inference_steps",
-        type=int,
-        default=50,
-        help="Количество шагов семплирования при генерации",
-    )
     parser.add_argument(
         "--image_size", type=int, default=64, help="Размер генерируемых изображений"
-    )
-    parser.add_argument(
-        "--generation_batch_size",
-        type=int,
-        default=4,
-        help="Размер батча для генерации изображений",
     )
 
     args = parser.parse_args()
